@@ -12,10 +12,12 @@ from .models import OCRPage, ReadingMetadata
 from .ocr import ocr_pdf_by_page
 from .persist import copy_source_pdf, default_reading_id_from_path, ensure_reading_dir, load_metadata, resolve_source_pdf, save_metadata
 
+_MOCK_EMBED_DIM = 768
+
 
 def _configure_embeddings(embedding_backend: str, ollama_base_url: str, embed_model: str) -> str:
     if embedding_backend == "mock":
-        Settings.embed_model = MockEmbedding(embed_dim=1536)
+        Settings.embed_model = MockEmbedding(embed_dim=_MOCK_EMBED_DIM)
         return "mock"
 
     try:
@@ -27,7 +29,7 @@ def _configure_embeddings(embedding_backend: str, ollama_base_url: str, embed_mo
         Settings.embed_model = OllamaEmbedding(model_name=embed_model, base_url=ollama_base_url)
         return "ollama"
     except Exception:
-        Settings.embed_model = MockEmbedding(embed_dim=1536)
+        Settings.embed_model = MockEmbedding(embed_dim=_MOCK_EMBED_DIM)
         return "mock"
 
 
