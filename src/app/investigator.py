@@ -55,6 +55,8 @@ _BROAD_QUERY_MARKERS = (
     "what role",
 )
 
+_LLM_AVAILABLE_CACHE: dict[tuple[str, str], bool] = {}
+
 
 @dataclass(slots=True)
 class RetrievedChunk:
@@ -528,6 +530,32 @@ def _format_selected_evidence(snippets: list[EvidenceSnippet]) -> str:
     return "\n".join(lines)
 
 
+def _ollama_model_available(answer_model: str, ollama_base_url: str) -> bool:
+    key = (ollama_base_url.rstrip("/"), answer_model)
+    cached = _LLM_AVAILABLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        import httpx
+
+        response = httpx.get(f"{key[0]}/api/tags", timeout=1.0)
+        response.raise_for_status()
+        payload = response.json() if response.content else {}
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        available = False
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") == answer_model or item.get("model") == answer_model:
+                available = True
+                break
+        _LLM_AVAILABLE_CACHE[key] = available
+        return available
+    except Exception:
+        _LLM_AVAILABLE_CACHE[key] = False
+        return False
+
+
 def _plan_followup_queries(
     question: str,
     selected_evidence: list[EvidenceSnippet],
@@ -537,6 +565,10 @@ def _plan_followup_queries(
 ) -> list[str]:
     if diagnostics is not None:
         diagnostics["followup_query_attempted"] = True
+    if not _ollama_model_available(answer_model, ollama_base_url):
+        if diagnostics is not None:
+            diagnostics["followup_query_skipped"] = "ollama_unavailable"
+        return []
     try:
         from llama_index.llms.ollama import Ollama
 
@@ -578,6 +610,10 @@ def _answer_with_llm(
         diagnostics["llm_attempted"] = True
         diagnostics["llm_succeeded"] = False
         diagnostics["llm_retries"] = 0
+    if not _ollama_model_available(answer_model, ollama_base_url):
+        if diagnostics is not None:
+            diagnostics["llm_skipped"] = "ollama_unavailable"
+        return None
     try:
         from llama_index.llms.ollama import Ollama
 

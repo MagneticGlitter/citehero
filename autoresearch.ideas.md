@@ -1,0 +1,1 @@
+- Add a graceful no-LLM synthesis mode for investigator responses so when Ollama is offline the app can still emit short, question-aware grounded answers instead of evidence-only fallbacks.
