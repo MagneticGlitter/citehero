@@ -267,20 +267,24 @@ def _question_profile(question: str) -> dict[str, bool]:
 
 
 @lru_cache(maxsize=4096)
+def _question_context(question: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]]:
+    refined = refine_query(question)
+    tokens = _tokenize_cached(question)
+    entities = tuple(_extract_entities(question))
+    broad = any(marker in question.lower() for marker in _BROAD_QUERY_MARKERS) or len(tokens) >= 12
+    return refined, tokens, entities, broad, _question_profile(question)
+
+
+@lru_cache(maxsize=4096)
 def _is_broad_question(question: str) -> bool:
-    lowered = question.lower()
-    if any(marker in lowered for marker in _BROAD_QUERY_MARKERS):
-        return True
-    return len(_tokenize(question)) >= 12
+    return _question_context(question)[3]
 
 
 def _build_query_variants(question: str, summary_context: dict[str, Any]) -> list[str]:
-    base = refine_query(question)
-    profile = _question_profile(question)
+    base, _, _, broad, profile = _question_context(question)
     entity_terms = summary_context.get("summary_entities", [])[:6]
     keyword_terms = summary_context.get("summary_keywords", [])[:8]
     relation_terms = summary_context.get("summary_relations", [])[:4]
-    broad = _is_broad_question(question)
 
     variants = [base]
     # Keep precise questions precise. Summary-derived terms are useful for broad
@@ -444,8 +448,9 @@ def retrieve_chunks(
 
 def _rerank_hits_for_question(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None) -> list[RetrievedChunk]:
     summary_context = summary_context or {}
-    summary_terms = set(_summary_signal_terms(summary_context)) if _is_broad_question(question) else set()
-    qterms = set(_tokenize(question))
+    _, qtokens, _, broad, _ = _question_context(question)
+    summary_terms = set(_summary_signal_terms(summary_context)) if broad else set()
+    qterms = set(qtokens)
     weighted: list[tuple[float, RetrievedChunk]] = []
 
     for hit in hits:
@@ -528,9 +533,10 @@ def _sentence_window(sentences: list[str], center_index: int, radius: int = 1) -
 
 def _best_sentence_score(sentence: str, question: str, summary_context: dict[str, Any] | None = None) -> float:
     summary_context = summary_context or {}
-    qterms = set(_tokenize(question))
+    _, qtokens, _, broad, _ = _question_context(question)
+    qterms = set(qtokens)
     stokens = set(_tokenize(sentence))
-    sterms = set(_summary_signal_terms(summary_context)) if _is_broad_question(question) else set()
+    sterms = set(_summary_signal_terms(summary_context)) if broad else set()
 
     score = len(qterms & stokens) * 1.25
     score += len(stokens & sterms) * 0.15
@@ -771,7 +777,7 @@ def _validate_llm_answer(answer: str, question: str, evidence: list[EvidenceSnip
         return None
     evidence_pages = {snippet.page_number for snippet in evidence}
     evidence_entities = _answer_entities(" ".join(snippet.quote for snippet in evidence))
-    question_entities = _answer_entities(question)
+    _, _, question_entities, _, _ = _question_context(question)
     supported: list[str] = []
     for sentence in _split_sentences(cleaned):
         if re.match(r"^\s*\d+\]", sentence):
@@ -799,6 +805,7 @@ def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet]) ->
         return "I couldn’t find enough evidence in the retrieved pages."
     sentences: list[str] = []
     seen_pages: set[int] = set()
+    _, _, _, broad, _ = _question_context(question)
     for snippet in selected_evidence:
         if snippet.page_number in seen_pages:
             continue
@@ -820,17 +827,19 @@ def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet]) ->
                 quote = quote[:180].rstrip() + "..."
             snippets.append(f"[p. {snippet.page_number}] {quote}")
         return "Based on the evidence, " + " ".join(snippets)
-    return "Based on the evidence, " + " ".join(sentences)
+    if broad:
+        return "Based on the evidence, " + " ".join(sentences)
+    return " ".join(sentences)
 
 
 def _evidence_sufficiency(question: str, evidence: list[EvidenceSnippet]) -> dict[str, Any]:
-    qterms = set(_tokenize(question))
+    _, qtokens, question_entities_raw, broad, _ = _question_context(question)
+    qterms = set(qtokens)
     evidence_text = " ".join(snippet.quote for snippet in evidence)
     evidence_terms = set(_tokenize(evidence_text))
     cited_pages = sorted({snippet.page_number for snippet in evidence})
     overlap = sorted(qterms & evidence_terms)
-    broad = _is_broad_question(question)
-    question_entities = {entity.lower() for entity in _extract_entities(question)}
+    question_entities = {entity.lower() for entity in question_entities_raw}
     evidence_entities = {entity.lower() for entity in _extract_entities(evidence_text)}
     entity_overlap = sorted(question_entities & evidence_entities)
     support_hits = [marker for marker in _SUPPORT_MARKERS if marker in evidence_text.lower()]
