@@ -197,10 +197,12 @@ def _get_reading_assets(reading_id: str, base_dir: str | Path = "data/ocr") -> d
     if cached is not None:
         return cached
     reading_dir = Path(base_dir) / reading_id
+    summary_context = _load_summary_context(reading_id, base_dir)
     assets = {
         "metadata": load_metadata(reading_dir),
         "pages": [OCRPage(**page) for page in load_pages(reading_dir)],
-        "summary_context": _load_summary_context(reading_id, base_dir),
+        "summary_context": summary_context,
+        "summary_signal_terms": _summary_signal_terms(summary_context),
     }
     try:
         assets["index"] = load_reading_index(reading_id, base_dir=base_dir)
@@ -211,6 +213,9 @@ def _get_reading_assets(reading_id: str, base_dir: str | Path = "data/ocr") -> d
 
 
 def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
+    cached_terms = summary_context.get("summary_signal_terms")
+    if isinstance(cached_terms, list):
+        return cached_terms
     terms: list[str] = []
     seen: set[str] = set()
     for key in ("summary_entities", "summary_keywords", "summary_relations"):
@@ -220,6 +225,7 @@ def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
                     seen.add(term)
                     terms.append(term)
     if terms:
+        summary_context["summary_signal_terms"] = terms
         return terms
 
     texts: list[str] = []
@@ -237,6 +243,7 @@ def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
                 if term not in seen:
                     seen.add(term)
                     fallback_entities.append(term)
+    summary_context["summary_signal_terms"] = fallback_entities
     return fallback_entities
 
 
@@ -249,6 +256,7 @@ def refine_query(question: str) -> str:
     return text or question.strip()
 
 
+@lru_cache(maxsize=4096)
 def _question_profile(question: str) -> dict[str, bool]:
     q = question.lower()
     return {
@@ -258,6 +266,7 @@ def _question_profile(question: str) -> dict[str, bool]:
     }
 
 
+@lru_cache(maxsize=4096)
 def _is_broad_question(question: str) -> bool:
     lowered = question.lower()
     if any(marker in lowered for marker in _BROAD_QUERY_MARKERS):
