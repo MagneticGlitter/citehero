@@ -56,6 +56,7 @@ _BROAD_QUERY_MARKERS = (
 )
 
 _LLM_AVAILABLE_CACHE: dict[tuple[str, str], bool] = {}
+_READING_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 @dataclass(slots=True)
@@ -159,6 +160,26 @@ def _load_summary_context(reading_id: str, base_dir: str | Path = "data/ocr") ->
             "summary_keywords": [],
             "summary_relations": [],
         }
+
+
+def _get_reading_assets(reading_id: str, base_dir: str | Path = "data/ocr") -> dict[str, Any]:
+    base = str(Path(base_dir).resolve())
+    key = (base, reading_id)
+    cached = _READING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    reading_dir = Path(base_dir) / reading_id
+    assets = {
+        "metadata": load_metadata(reading_dir),
+        "pages": [OCRPage(**page) for page in load_pages(reading_dir)],
+        "summary_context": _load_summary_context(reading_id, base_dir),
+    }
+    try:
+        assets["index"] = load_reading_index(reading_id, base_dir=base_dir)
+    except Exception as exc:
+        assets["index_error"] = f"{type(exc).__name__}: {exc}"
+    _READING_CACHE[key] = assets
+    return assets
 
 
 def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
@@ -286,12 +307,19 @@ def _retrieve_with_index(
     diagnostics: dict[str, Any] | None = None,
 ) -> list[RetrievedChunk]:
     try:
-        metadata = load_metadata(Path(base_dir) / reading_id)
+        assets = _get_reading_assets(reading_id, base_dir)
+        metadata = assets["metadata"]
         if metadata.get("embedding_backend") == "mock":
             if diagnostics is not None:
                 diagnostics["vector_skipped_reason"] = "metadata embedding_backend is mock"
             return []
-        index = load_reading_index(reading_id, base_dir=base_dir)
+        index = assets.get("index")
+        if index is None:
+            if diagnostics is not None:
+                diagnostics["vector_attempted"] = True
+                diagnostics["vector_succeeded"] = False
+                diagnostics["vector_error"] = assets.get("index_error", "index unavailable")
+            return []
         retriever = index.as_retriever(similarity_top_k=top_k)
         results = retriever.retrieve(query)
         hits: list[RetrievedChunk] = []
@@ -328,7 +356,7 @@ def retrieve_chunks(
     summary_context: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[RetrievedChunk]:
-    summary_context = summary_context or _load_summary_context(reading_id, base_dir)
+    summary_context = summary_context or _get_reading_assets(reading_id, base_dir)["summary_context"]
     variants = _build_query_variants(question, summary_context)
     if diagnostics is not None:
         diagnostics["query_variants"] = variants
@@ -351,7 +379,7 @@ def retrieve_chunks(
             diagnostics["initial_pages"] = [hit.page_number for hit in hits[:top_k]]
         return hits[:top_k]
 
-    pages = [OCRPage(**page) for page in load_pages(Path(base_dir) / reading_id)]
+    pages = _get_reading_assets(reading_id, base_dir)["pages"]
     query_terms = _tokenize(variants[0]) or _tokenize(question)
 
     chunks: list[tuple[str, int, str]] = []
@@ -408,7 +436,7 @@ def _expand_with_adjacent_pages(
     if not hits:
         return hits
     try:
-        pages = [OCRPage(**page) for page in load_pages(Path(base_dir) / reading_id)]
+        pages = _get_reading_assets(reading_id, base_dir)["pages"]
     except Exception:
         return hits
 
