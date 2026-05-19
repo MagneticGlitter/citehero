@@ -212,10 +212,14 @@ def _get_reading_assets(reading_id: str, base_dir: str | Path = "data/ocr") -> d
     return assets
 
 
-def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
+def _summary_signal_terms(summary_context: dict[str, Any]) -> tuple[str, ...]:
     cached_terms = summary_context.get("summary_signal_terms")
-    if isinstance(cached_terms, list):
+    if isinstance(cached_terms, tuple):
         return cached_terms
+    if isinstance(cached_terms, list):
+        cached_tuple = tuple(cached_terms)
+        summary_context["summary_signal_terms"] = cached_tuple
+        return cached_tuple
     terms: list[str] = []
     seen: set[str] = set()
     for key in ("summary_entities", "summary_keywords", "summary_relations"):
@@ -225,8 +229,9 @@ def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
                     seen.add(term)
                     terms.append(term)
     if terms:
-        summary_context["summary_signal_terms"] = terms
-        return terms
+        cached_tuple = tuple(terms)
+        summary_context["summary_signal_terms"] = cached_tuple
+        return cached_tuple
 
     texts: list[str] = []
     merged = summary_context.get("merged_summary")
@@ -243,8 +248,9 @@ def _summary_signal_terms(summary_context: dict[str, Any]) -> list[str]:
                 if term not in seen:
                     seen.add(term)
                     fallback_entities.append(term)
-    summary_context["summary_signal_terms"] = fallback_entities
-    return fallback_entities
+    cached_tuple = tuple(fallback_entities)
+    summary_context["summary_signal_terms"] = cached_tuple
+    return cached_tuple
 
 
 def refine_query(question: str) -> str:
