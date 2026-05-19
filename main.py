@@ -76,14 +76,11 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
-    answer_model = None if args.answer_model in {None, "", "none", "false"} else args.answer_model
     result = investigate_reading(
         reading_id=args.reading_id,
         question=args.question,
         base_dir=args.base_dir,
         top_k=args.top_k,
-        answer_model=answer_model,
-        ollama_base_url=args.ollama_base_url,
     )
     print(investigation_markdown(result))
     return 0
@@ -149,8 +146,6 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("--reading-id", required=True)
     ask.add_argument("--question", required=True)
     ask.add_argument("--top-k", type=int, default=10)
-    ask.add_argument("--answer-model", default="qwen2.5-deterministic")
-    ask.add_argument("--ollama-base-url", default="http://localhost:11434")
     ask.set_defaults(func=_cmd_ask)
 
     study = sub.add_parser("study", help="Print study materials built from summary.json")

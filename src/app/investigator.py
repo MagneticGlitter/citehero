@@ -56,8 +56,13 @@ _BROAD_QUERY_MARKERS = (
     "what role",
 )
 
-_LLM_AVAILABLE_CACHE: dict[tuple[str, str], bool] = {}
 _READING_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_ENTITY_PATTERN = re.compile(r"\b(?:[A-Z][A-Za-z'’-]*(?:\s+[A-Z][A-Za-z'’-]*){0,3})\b")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_JSON_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
+_CITED_PAGE_RE = re.compile(r"\[p\.\s*(\d+)\]")
+_TRAILING_CITATION_RE = re.compile(r"\(p\.?\s*$", flags=re.I)
+_LEADING_INDEX_RE = re.compile(r"^\s*\d+\]")
 
 
 @dataclass(slots=True)
@@ -608,160 +613,123 @@ def _select_evidence_snippets(question: str, hits: list[RetrievedChunk], summary
     return selected
 
 
-def _format_selected_evidence(snippets: list[EvidenceSnippet]) -> str:
-    lines: list[str] = []
-    for snippet in snippets:
-        quote = _normalize(snippet.quote)
-        if len(quote) > 1400:
-            quote = quote[:1400].rstrip() + "..."
-        lines.append(f"[p. {snippet.page_number} | {snippet.chunk_id}] \"{quote}\"")
-    return "\n".join(lines)
-
-
-def _ollama_model_available(answer_model: str, ollama_base_url: str) -> bool:
-    key = (ollama_base_url.rstrip("/"), answer_model)
-    cached = _LLM_AVAILABLE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
-        import httpx
-
-        response = httpx.get(f"{key[0]}/api/tags", timeout=1.0)
-        response.raise_for_status()
-        payload = response.json() if response.content else {}
-        models = payload.get("models", []) if isinstance(payload, dict) else []
-        available = False
-        for item in models:
-            if not isinstance(item, dict):
-                continue
-            if item.get("name") == answer_model or item.get("model") == answer_model:
-                available = True
-                break
-        _LLM_AVAILABLE_CACHE[key] = available
-        return available
-    except Exception:
-        _LLM_AVAILABLE_CACHE[key] = False
-        return False
-
-
-def _plan_followup_queries(
-    question: str,
-    selected_evidence: list[EvidenceSnippet],
-    answer_model: str,
-    ollama_base_url: str,
-    diagnostics: dict[str, Any] | None = None,
-) -> list[str]:
-    if diagnostics is not None:
-        diagnostics["followup_query_attempted"] = True
-    if not _ollama_model_available(answer_model, ollama_base_url):
-        if diagnostics is not None:
-            diagnostics["followup_query_skipped"] = "ollama_unavailable"
-        return []
-    try:
-        from llama_index.llms.ollama import Ollama
-
-        llm = Ollama(model=answer_model, base_url=ollama_base_url, request_timeout=45.0)
-        evidence = _format_selected_evidence(selected_evidence)
-        prompt = (
-            "You are improving retrieval for a page-grounded literature QA system.\n"
-            "Given the question and current evidence, propose up to 2 short search queries that would find missing source evidence.\n"
-            "Use names/actions from the question and likely source vocabulary. Do not answer the question.\n"
-            "Return only a JSON array of strings, no markdown.\n\n"
-            f"Question: {question}\n\n"
-            f"Current evidence:\n{evidence}\n\n"
-            "Queries:"
-        )
-        response = llm.complete(prompt)
-        text = (getattr(response, "text", None) or str(response)).strip()
-        match = re.search(r"\[[\s\S]*\]", text)
-        payload = json.loads(match.group(0) if match else text)
-        queries = [str(item).strip() for item in payload if str(item).strip()]
-        queries = queries[:2]
-        if diagnostics is not None:
-            diagnostics["followup_queries"] = queries
-        return queries
-    except Exception as exc:
-        if diagnostics is not None:
-            diagnostics["followup_query_error"] = f"{type(exc).__name__}: {exc}"
-        return []
-
-
-def _answer_with_llm(
-    question: str,
-    refined_query: str,
-    selected_evidence: list[EvidenceSnippet],
-    answer_model: str,
-    ollama_base_url: str,
-    diagnostics: dict[str, Any] | None = None,
-    question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None,
-) -> str | None:
-    if diagnostics is not None:
-        diagnostics["llm_attempted"] = True
-        diagnostics["llm_succeeded"] = False
-        diagnostics["llm_retries"] = 0
-    if not _ollama_model_available(answer_model, ollama_base_url):
-        if diagnostics is not None:
-            diagnostics["llm_skipped"] = "ollama_unavailable"
-        return None
-    try:
-        from llama_index.llms.ollama import Ollama
-
-        llm = Ollama(model=answer_model, base_url=ollama_base_url, request_timeout=60.0)
-        evidence = _format_selected_evidence(selected_evidence)
-        prompts = [
-            (
-                "Answer using only the selected evidence quotes below.\n"
-                "Be concise and factual. If the evidence is insufficient, say so.\n"
-                "Every claim must be directly supported by one of the quotes.\n"
-                "Use only entities and roles that appear in the evidence.\n"
-                "If you cite a page, it must be one of the pages in the evidence.\n"
-                "Return exactly 1-2 complete sentences, not bullets.\n"
-                "Every sentence must end cleanly and may include one page citation.\n\n"
-                f"Question: {question}\n"
-                f"Refined query: {refined_query}\n\n"
-                f"Selected evidence:\n{evidence}\n\n"
-                "Answer:"
-            ),
-            (
-                "Your previous answer did not satisfy the contract.\n"
-                "Rewrite it using only the selected evidence.\n"
-                "Return exactly 1-2 complete sentences, with supported entities only.\n"
-                "Do not add any new names, roles, or unsupported claims.\n\n"
-                f"Question: {question}\n"
-                f"Refined query: {refined_query}\n\n"
-                f"Selected evidence:\n{evidence}\n\n"
-                "Answer:"
-            ),
-        ]
-        last_text = ""
-        for attempt, prompt in enumerate(prompts, start=1):
-            response = llm.complete(prompt)
-            text = (getattr(response, "text", None) or str(response)).strip()
-            last_text = text
-            validated = _validate_llm_answer(text, question, selected_evidence, question_ctx=question_ctx)
-            if validated:
-                if diagnostics is not None:
-                    diagnostics["llm_succeeded"] = True
-                    diagnostics["llm_retries"] = attempt - 1
-                return validated
-            if diagnostics is not None:
-                diagnostics["llm_retries"] = attempt
-                diagnostics["llm_last_raw_answer"] = text[:1000]
-        if diagnostics is not None:
-            diagnostics["llm_last_raw_answer"] = last_text[:1000]
-        return None
-    except Exception as exc:
-        if diagnostics is not None:
-            diagnostics["llm_error"] = f"{type(exc).__name__}: {exc}"
-        return None
-
-
 def _extract_cited_pages(text: str) -> set[int]:
     return {int(match.group(1)) for match in re.finditer(r"\[p\.\s*(\d+)\]", text)}
 
 
 def _answer_entities(text: str) -> set[str]:
     return {entity.lower() for entity in _extract_entities(text)}
+
+
+def _evidence_focus_terms(question: str, selected_evidence: list[EvidenceSnippet], summary_context: dict[str, Any] | None = None, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> list[str]:
+    refined, qtokens, qentities, broad, _ = question_ctx or _question_context(question)
+    qterms = set(qtokens)
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        cleaned = _normalize(term)
+        if not cleaned:
+            return
+        lower = cleaned.lower()
+        if lower in seen or lower in _STOPWORDS:
+            return
+        seen.add(lower)
+        terms.append(cleaned)
+
+    for entity in qentities[:3]:
+        add(entity)
+    for token in qtokens:
+        if len(token) > 3:
+            add(token)
+    for snippet in selected_evidence:
+        for entity in _extract_entities(snippet.quote):
+            if entity.lower() not in {item.lower() for item in qentities}:
+                add(entity)
+        for token in _tokenize(snippet.quote):
+            if len(token) > 4 and token not in qterms:
+                add(token)
+        if len(terms) >= 8:
+            break
+    if broad:
+        for signal in _summary_signal_terms(summary_context or {}):
+            if len(signal) > 3:
+                add(signal)
+            if len(terms) >= 10:
+                break
+    if refined and refined.lower() not in seen:
+        terms.insert(0, refined)
+    return terms[:10]
+
+
+def _plan_followup_queries(
+    question: str,
+    selected_evidence: list[EvidenceSnippet],
+    summary_context: dict[str, Any] | None = None,
+    question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None,
+) -> list[str]:
+    base, qtokens, qentities, broad, profile = question_ctx or _question_context(question)
+    focus_terms = _evidence_focus_terms(question, selected_evidence, summary_context=summary_context, question_ctx=question_ctx)
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(query: str) -> None:
+        cleaned = _normalize(query)
+        if not cleaned or cleaned.lower() in seen:
+            return
+        seen.add(cleaned.lower())
+        queries.append(cleaned)
+
+    add(base)
+
+    if qentities and focus_terms:
+        add(_normalize(f"{qentities[0]} {' '.join(focus_terms[:3])}"))
+
+    if focus_terms and any(term.lower() not in {entity.lower() for entity in qentities} for term in focus_terms[1:4]):
+        add(_normalize(" ".join(focus_terms[:4])))
+
+    if broad or profile["abstract"] or profile["comparative"]:
+        add(_normalize(f"{base} {' '.join(focus_terms[:5])}"))
+
+    return queries[:2]
+
+
+def _answer_from_citations(question: str, selected_evidence: list[EvidenceSnippet], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> str:
+    if not selected_evidence:
+        return "I couldn’t find enough evidence in the retrieved pages."
+    _, _, _, broad, profile = question_ctx or _question_context(question)
+    answered: list[str] = []
+    seen_pages: set[int] = set()
+
+    for snippet in selected_evidence:
+        if snippet.page_number in seen_pages:
+            continue
+        seen_pages.add(snippet.page_number)
+        sentences = _split_sentences(snippet.quote)
+        if not sentences:
+            continue
+        best = max(sentences, key=lambda sent: (_best_sentence_score(sent, question, question_ctx=question_ctx), _sentence_support(sent, [snippet])))
+        best = _normalize(best)
+        if not best:
+            continue
+        if best[-1] not in ".!?":
+            best += "."
+        answered.append(f"{best} [p. {snippet.page_number}]")
+        if len(answered) >= (2 if broad or profile["abstract"] or profile["comparative"] else 1):
+            break
+
+    if not answered:
+        snippets = []
+        for snippet in selected_evidence[:3]:
+            quote = _normalize(snippet.quote)
+            if len(quote) > 180:
+                quote = quote[:180].rstrip() + "..."
+            snippets.append(f"[p. {snippet.page_number}] {quote}")
+        return "Based on the evidence, " + " ".join(snippets)
+
+    if broad or profile["abstract"] or profile["comparative"]:
+        return "Based on the evidence, " + " ".join(answered)
+    return answered[0]
 
 
 @lru_cache(maxsize=16384)
@@ -883,15 +851,12 @@ def investigate_reading(
     question: str,
     base_dir: str | Path = "data/ocr",
     top_k: int = 10,
-    answer_model: str | None = "qwen2.5-deterministic",
-    ollama_base_url: str = "http://localhost:11434",
 ) -> InvestigationResult:
     summary_context = _load_summary_context(reading_id, base_dir)
     question_ctx = _question_context(question)
     refined_query = question_ctx[0]
     diagnostics: dict[str, Any] = {
-        "llm_attempted": False,
-        "llm_succeeded": False,
+        "citation_only_mode": True,
     }
     hits = retrieve_chunks(
         reading_id,
@@ -906,8 +871,6 @@ def investigate_reading(
     hits = _rerank_hits_for_question(question, hits, summary_context=summary_context, question_ctx=question_ctx)
     diagnostics["pages_after_rerank"] = [hit.page_number for hit in hits[:top_k]]
 
-    # First follow-up pass: if we found promising pages, include adjacent pages so
-    # answer-bearing lines just before/after a chunk are available to the model.
     expanded_hits = _expand_with_adjacent_pages(reading_id, hits[:top_k], base_dir)
     if len(expanded_hits) > len(hits[:top_k]):
         diagnostics["adjacent_expansion_added"] = len(expanded_hits) - len(hits[:top_k])
@@ -925,47 +888,52 @@ def investigate_reading(
     )
     diagnostics["evidence_sufficiency"] = _evidence_sufficiency(question, selected_evidence, question_ctx=question_ctx)
 
-    # One agentic follow-up retrieval pass: let the answer model inspect current
-    # evidence and propose missing-evidence search queries, then merge those hits
-    # before final answer generation. This is bounded and source-grounded: the LLM
-    # proposes queries only; it does not supply facts.
-    if answer_model:
-        followup_queries = _plan_followup_queries(question, selected_evidence, answer_model, ollama_base_url, diagnostics=diagnostics)
-        if followup_queries:
-            merged: dict[tuple[int, str], RetrievedChunk] = {(hit.page_number, hit.chunk_id): hit for hit in hits}
-            for followup in followup_queries:
-                followup_hits = retrieve_chunks(
-                    reading_id,
-                    followup,
-                    base_dir=base_dir,
-                    top_k=6,
-                    summary_context=summary_context,
-                )
-                for hit in followup_hits:
-                    key = (hit.page_number, hit.chunk_id)
-                    existing = merged.get(key)
-                    if existing is None or hit.score > existing.score:
-                        merged[key] = hit
-            hits = _rerank_hits_for_question(question, list(merged.values()), summary_context=summary_context, question_ctx=question_ctx)
-            hits = _rerank_hits_for_question(question, _expand_with_adjacent_pages(reading_id, hits[: max(top_k, 12)], base_dir), summary_context=summary_context, question_ctx=question_ctx)
-            selected_evidence = _select_evidence_snippets(
-                question,
-                hits[: max(top_k, 12 if question_ctx[3] else top_k)],
+    followup_round = 0
+    while followup_round < 2:
+        sufficiency = _evidence_sufficiency(question, selected_evidence, question_ctx=question_ctx)
+        if sufficiency["sufficient"]:
+            diagnostics["evidence_sufficiency_after_followup"] = sufficiency
+            break
+        followup_queries = _plan_followup_queries(question, selected_evidence, summary_context=summary_context, question_ctx=question_ctx)
+        if not followup_queries:
+            diagnostics["followup_queries"] = [] if followup_round == 0 else diagnostics.get("followup_queries")
+            diagnostics["evidence_sufficiency_after_followup"] = sufficiency
+            break
+        diagnostics.setdefault("followup_queries", [])
+        diagnostics["followup_queries"] = list(dict.fromkeys((diagnostics["followup_queries"] or []) + followup_queries))
+        merged: dict[tuple[int, str], RetrievedChunk] = {(hit.page_number, hit.chunk_id): hit for hit in hits}
+        new_hit_count = 0
+        for followup in followup_queries:
+            followup_hits = retrieve_chunks(
+                reading_id,
+                followup,
+                base_dir=base_dir,
+                top_k=6,
                 summary_context=summary_context,
-                max_snippets=5 if question_ctx[3] else 3,
-                question_ctx=question_ctx,
             )
-            diagnostics["pages_after_followup"] = [hit.page_number for hit in hits[: max(top_k, 12)]]
-            diagnostics["evidence_sufficiency_after_followup"] = _evidence_sufficiency(question, selected_evidence)
+            for hit in followup_hits:
+                key = (hit.page_number, hit.chunk_id)
+                existing = merged.get(key)
+                if existing is None or hit.score > existing.score:
+                    merged[key] = hit
+                    new_hit_count += 1
+        if new_hit_count == 0:
+            diagnostics["evidence_sufficiency_after_followup"] = sufficiency
+            break
+        hits = _rerank_hits_for_question(question, list(merged.values()), summary_context=summary_context, question_ctx=question_ctx)
+        hits = _rerank_hits_for_question(question, _expand_with_adjacent_pages(reading_id, hits[: max(top_k, 12)], base_dir), summary_context=summary_context, question_ctx=question_ctx)
+        selected_evidence = _select_evidence_snippets(
+            question,
+            hits[: max(top_k, 12 if question_ctx[3] else top_k)],
+            summary_context=summary_context,
+            max_snippets=5 if question_ctx[3] else 3,
+            question_ctx=question_ctx,
+        )
+        diagnostics["pages_after_followup"] = [hit.page_number for hit in hits[: max(top_k, 12)]]
+        diagnostics["evidence_sufficiency_after_followup"] = _evidence_sufficiency(question, selected_evidence, question_ctx=question_ctx)
+        followup_round += 1
 
-    answer = _fallback_answer(question, selected_evidence, question_ctx=question_ctx)
-    if answer_model:
-        llm_answer = _answer_with_llm(question, refined_query, selected_evidence, answer_model, ollama_base_url, diagnostics=diagnostics, question_ctx=question_ctx)
-        if llm_answer:
-            filtered = _filter_supported_answer(llm_answer, question, selected_evidence, question_ctx=question_ctx)
-            diagnostics["llm_answer_filtered_out"] = bool(llm_answer and not filtered)
-            if filtered:
-                answer = filtered
+    answer = _answer_from_citations(question, selected_evidence, question_ctx=question_ctx)
     return InvestigationResult(
         reading_id=reading_id,
         question=question,
@@ -973,7 +941,6 @@ def investigate_reading(
         answer=answer,
         hits=hits[:top_k],
         selected_evidence=selected_evidence,
-        answer_model=answer_model,
         diagnostics=diagnostics,
     )
 
@@ -992,9 +959,9 @@ def investigation_markdown(result: InvestigationResult) -> str:
     if result.diagnostics:
         lines.extend([
             "Diagnostics:",
+            f"- citation_only_mode: {result.diagnostics.get('citation_only_mode')}",
             f"- retrieval_backend: {result.diagnostics.get('retrieval_backend')}",
             f"- vector_succeeded: {result.diagnostics.get('vector_succeeded')}",
-            f"- llm_succeeded: {result.diagnostics.get('llm_succeeded')}",
             f"- pages_before_rerank: {result.diagnostics.get('pages_before_rerank')}",
             f"- pages_after_expansion: {result.diagnostics.get('pages_after_expansion')}",
             f"- followup_queries: {result.diagnostics.get('followup_queries')}",

@@ -33,7 +33,6 @@ export default function (pi: ExtensionAPI) {
       reading_id: Type.String({ description: "Reading identifier" }),
       question: Type.String({ description: "User question" }),
       top_k: Type.Optional(Type.Number({ description: "Number of evidence chunks", default: 5 })),
-      answer_model: Type.Optional(Type.String({ description: "Ollama model name", default: "qwen2.5-deterministic" })),
       base_dir: Type.Optional(Type.String({ description: "OCR data directory", default: "data/ocr" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -50,8 +49,6 @@ export default function (pi: ExtensionAPI) {
           params.question,
           "--top-k",
           String(params.top_k ?? 5),
-          "--answer-model",
-          params.answer_model ?? "qwen2.5-deterministic",
         ],
         cwd,
       );
