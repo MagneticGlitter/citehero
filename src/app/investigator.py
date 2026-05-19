@@ -396,9 +396,10 @@ def retrieve_chunks(
     top_k: int = 10,
     summary_context: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None,
 ) -> list[RetrievedChunk]:
     summary_context = summary_context or _get_reading_assets(reading_id, base_dir)["summary_context"]
-    variants = _build_query_variants(question, summary_context)
+    variants = _build_query_variants(question, summary_context, question_ctx=question_ctx)
     if diagnostics is not None:
         diagnostics["query_variants"] = variants
         diagnostics.setdefault("vector_attempted", False)
@@ -881,6 +882,7 @@ def investigate_reading(
         top_k=max(top_k, 12 if question_ctx[3] else top_k),
         summary_context=summary_context,
         diagnostics=diagnostics,
+        question_ctx=question_ctx,
     )
     diagnostics["pages_before_rerank"] = [hit.page_number for hit in hits]
     hits = _rerank_hits_for_question(question, hits, summary_context=summary_context, question_ctx=question_ctx)
