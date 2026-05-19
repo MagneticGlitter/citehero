@@ -24,7 +24,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--embedding-backend", choices=("auto", "ollama", "mock"), default="auto")
     parser.add_argument("--ollama-base-url", default="http://localhost:11434")
     parser.add_argument("--embed-model", default="nomic-embed-text")
-    parser.add_argument("--llm-model")
     args = parser.parse_args(argv)
 
     reading_dir = ingest_reading(
@@ -41,7 +40,6 @@ def main(argv: list[str] | None = None) -> int:
         embedding_backend=args.embedding_backend,
         ollama_base_url=args.ollama_base_url,
         embed_model=args.embed_model,
-        llm_model=args.llm_model,
     )
     print(reading_dir)
     return 0

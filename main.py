@@ -7,8 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+from app.investigator import investigate_reading, investigation_markdown
 from app.persist import load_metadata, load_pages
 from app.pipeline import ingest_reading
+from app.summary import summarize_reading
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
@@ -26,7 +28,6 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         embedding_backend=args.embedding_backend,
         ollama_base_url=args.ollama_base_url,
         embed_model=args.embed_model,
-        llm_model=args.llm_model,
     )
     print(reading_dir)
     return 0
@@ -58,6 +59,44 @@ def _cmd_meta(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    summary = summarize_reading(
+        reading_id=args.reading_id,
+        base_dir=args.base_dir,
+        window_size=args.summary_window_size,
+        window_target_words=args.summary_window_target_words,
+        window_hard_cap_words=args.summary_window_hard_cap_words,
+        merge_target_words=args.summary_merge_target_words,
+        merge_hard_cap_words=args.summary_merge_hard_cap_words,
+        ollama_base_url=args.ollama_base_url,
+        llm_model=args.llm_model,
+    )
+    print(json.dumps(summary.to_dict(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_ask(args: argparse.Namespace) -> int:
+    answer_model = None if args.answer_model in {None, "", "none", "false"} else args.answer_model
+    result = investigate_reading(
+        reading_id=args.reading_id,
+        question=args.question,
+        base_dir=args.base_dir,
+        top_k=args.top_k,
+        answer_model=answer_model,
+        ollama_base_url=args.ollama_base_url,
+    )
+    print(investigation_markdown(result))
+    return 0
+
+
+def _cmd_study(args: argparse.Namespace) -> int:
+    reading_dir = Path(args.base_dir) / args.reading_id / "summaries" / "study_materials.md"
+    if not reading_dir.exists():
+        raise SystemExit("study materials not found; run `python main.py summarize --reading-id ...` first")
+    print(reading_dir.read_text(encoding="utf-8"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local reading assistant CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -76,7 +115,6 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--embedding-backend", choices=("auto", "ollama", "mock"), default="auto")
     ingest.add_argument("--ollama-base-url", default="http://localhost:11434")
     ingest.add_argument("--embed-model", default="nomic-embed-text")
-    ingest.add_argument("--llm-model")
     ingest.set_defaults(func=_cmd_ingest)
 
     list_cmd = sub.add_parser("list", help="List ingested readings")
@@ -93,6 +131,32 @@ def main(argv: list[str] | None = None) -> int:
     meta.add_argument("--base-dir", default="data/ocr")
     meta.add_argument("--reading-id")
     meta.set_defaults(func=_cmd_meta)
+
+    summarize = sub.add_parser("summarize", help="Build window and document summaries")
+    summarize.add_argument("--base-dir", default="data/ocr")
+    summarize.add_argument("--reading-id", required=True)
+    summarize.add_argument("--ollama-base-url", default="http://localhost:11434")
+    summarize.add_argument("--llm-model", default="qwen2.5-deterministic")
+    summarize.add_argument("--summary-window-size", type=int, default=10)
+    summarize.add_argument("--summary-window-target-words", type=int, default=1000)
+    summarize.add_argument("--summary-window-hard-cap-words", type=int, default=2000)
+    summarize.add_argument("--summary-merge-target-words", type=int, default=1000)
+    summarize.add_argument("--summary-merge-hard-cap-words", type=int, default=2000)
+    summarize.set_defaults(func=_cmd_summarize)
+
+    ask = sub.add_parser("ask", help="Answer a question with grounded retrieval")
+    ask.add_argument("--base-dir", default="data/ocr")
+    ask.add_argument("--reading-id", required=True)
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--top-k", type=int, default=10)
+    ask.add_argument("--answer-model", default="qwen2.5-deterministic")
+    ask.add_argument("--ollama-base-url", default="http://localhost:11434")
+    ask.set_defaults(func=_cmd_ask)
+
+    study = sub.add_parser("study", help="Print study materials built from summary.json")
+    study.add_argument("--base-dir", default="data/ocr")
+    study.add_argument("--reading-id", required=True)
+    study.set_defaults(func=_cmd_study)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -49,6 +49,15 @@ class ReadingMetadata:
     embedding_backend: str | None = None
     embed_model: str | None = None
     llm_model: str | None = None
+    summary_window_size: int | None = None
+    summary_window_target_words: int | None = None
+    summary_window_hard_cap_words: int | None = None
+    summary_merge_target_words: int | None = None
+    summary_merge_hard_cap_words: int | None = None
+    summary_window_max_words: int | None = None
+    summary_merge_max_words: int | None = None
+    summary_model: str | None = None
+    summary_generated_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -98,7 +98,6 @@ def ingest_reading(
     embedding_backend: str = "auto",
     ollama_base_url: str = "http://localhost:11434",
     embed_model: str = "nomic-embed-text",
-    llm_model: str | None = None,
 ) -> Path:
     file_path = resolve_source_pdf(file_path)
     reading_id = reading_id or default_reading_id_from_path(file_path)
@@ -117,15 +116,12 @@ def ingest_reading(
         renderer="pymupdf",
         embedding_backend=embedding_backend,
         embed_model=embed_model,
-        llm_model=llm_model,
     )
 
     copy_source_pdf(file_path, reading_dir)
 
     effective_embedding_backend = _configure_embeddings(embedding_backend, ollama_base_url, embed_model)
-    effective_llm_model = _configure_llm(ollama_base_url, llm_model)
     metadata.embedding_backend = effective_embedding_backend
-    metadata.llm_model = effective_llm_model
     save_metadata(reading_dir, metadata)
 
     splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=120)
@@ -135,6 +131,7 @@ def ingest_reading(
 
     pages_path = reading_dir / "pages.json"
     pages_tmp_path = reading_dir / "pages.json.tmp"
+    pages: list[OCRPage] = []
     page_count = 0
     with pages_tmp_path.open("w", encoding="utf-8") as handle:
         handle.write("[\n")
@@ -143,6 +140,7 @@ def ingest_reading(
             if not first:
                 handle.write(",\n")
             json.dump(page.to_dict(), handle, ensure_ascii=False)
+            pages.append(page)
             document = _document_for_page(page, metadata)
             nodes = _nodes_from_document(document, reading_id=reading_id, splitter=splitter)
             index.insert_nodes(nodes)
