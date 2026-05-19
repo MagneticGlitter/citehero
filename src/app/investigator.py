@@ -532,16 +532,21 @@ def _sentence_window(sentences: list[str], center_index: int, radius: int = 1) -
     return " ".join(sentences[start:end]).strip()
 
 
-def _best_sentence_score(sentence: str, question: str, summary_context: dict[str, Any] | None = None, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> float:
-    summary_context = summary_context or {}
-    _, qtokens, _, broad, _ = question_ctx or _question_context(question)
-    qterms = set(qtokens)
+@lru_cache(maxsize=16384)
+def _best_sentence_score_cached(sentence: str, question: str, broad: bool, summary_terms: tuple[str, ...]) -> float:
+    qterms = set(_tokenize(question))
     stokens = set(_tokenize(sentence))
-    sterms = set(_summary_signal_terms(summary_context)) if broad else set()
-
+    sterms = set(summary_terms) if broad else set()
     score = len(qterms & stokens) * 1.25
     score += len(stokens & sterms) * 0.15
     return score
+
+
+def _best_sentence_score(sentence: str, question: str, summary_context: dict[str, Any] | None = None, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> float:
+    summary_context = summary_context or {}
+    _, _, _, broad, _ = question_ctx or _question_context(question)
+    summary_terms = tuple(_summary_signal_terms(summary_context)) if broad else tuple()
+    return _best_sentence_score_cached(sentence, question, broad, summary_terms)
 
 
 def _select_evidence_snippets(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None, max_snippets: int = 3, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> list[EvidenceSnippet]:
@@ -682,6 +687,7 @@ def _answer_with_llm(
     answer_model: str,
     ollama_base_url: str,
     diagnostics: dict[str, Any] | None = None,
+    question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None,
 ) -> str | None:
     if diagnostics is not None:
         diagnostics["llm_attempted"] = True
@@ -726,7 +732,7 @@ def _answer_with_llm(
             response = llm.complete(prompt)
             text = (getattr(response, "text", None) or str(response)).strip()
             last_text = text
-            validated = _validate_llm_answer(text, question, selected_evidence)
+            validated = _validate_llm_answer(text, question, selected_evidence, question_ctx=question_ctx)
             if validated:
                 if diagnostics is not None:
                     diagnostics["llm_succeeded"] = True
@@ -752,23 +758,28 @@ def _answer_entities(text: str) -> set[str]:
     return {entity.lower() for entity in _extract_entities(text)}
 
 
-def _sentence_support(sentence: str, evidence: list[EvidenceSnippet]) -> float:
+@lru_cache(maxsize=16384)
+def _sentence_support_cached(sentence: str, quote: str) -> float:
     sent_terms = set(_tokenize(sentence))
     if not sent_terms:
         return 0.0
+    quote_terms = set(_tokenize(quote))
+    overlap = len(sent_terms & quote_terms)
+    if overlap == 0:
+        return 0.0
+    ratio = overlap / max(1, len(sent_terms))
+    phrase_hit = 1.0 if sentence.lower() in quote.lower() or quote.lower() in sentence.lower() else 0.0
+    return ratio + phrase_hit
+
+
+def _sentence_support(sentence: str, evidence: list[EvidenceSnippet]) -> float:
     best = 0.0
     for snippet in evidence:
-        quote_terms = set(_tokenize(snippet.quote))
-        overlap = len(sent_terms & quote_terms)
-        if overlap == 0:
-            continue
-        ratio = overlap / max(1, len(sent_terms))
-        phrase_hit = 1.0 if sentence.lower() in snippet.quote.lower() or snippet.quote.lower() in sentence.lower() else 0.0
-        best = max(best, ratio + phrase_hit)
+        best = max(best, _sentence_support_cached(sentence, snippet.quote))
     return best
 
 
-def _validate_llm_answer(answer: str, question: str, evidence: list[EvidenceSnippet]) -> str | None:
+def _validate_llm_answer(answer: str, question: str, evidence: list[EvidenceSnippet], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> str | None:
     cleaned = _normalize(answer)
     if not cleaned:
         return None
@@ -778,7 +789,8 @@ def _validate_llm_answer(answer: str, question: str, evidence: list[EvidenceSnip
         return None
     evidence_pages = {snippet.page_number for snippet in evidence}
     evidence_entities = _answer_entities(" ".join(snippet.quote for snippet in evidence))
-    _, _, question_entities, _, _ = _question_context(question)
+    _, _, question_entities_raw, _, _ = question_ctx or _question_context(question)
+    question_entities = {entity.lower() for entity in question_entities_raw}
     supported: list[str] = []
     for sentence in _split_sentences(cleaned):
         if re.match(r"^\s*\d+\]", sentence):
@@ -796,8 +808,8 @@ def _validate_llm_answer(answer: str, question: str, evidence: list[EvidenceSnip
     return " ".join(supported).strip() if supported else None
 
 
-def _filter_supported_answer(answer: str, question: str, evidence: list[EvidenceSnippet]) -> str:
-    validated = _validate_llm_answer(answer, question, evidence)
+def _filter_supported_answer(answer: str, question: str, evidence: list[EvidenceSnippet], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> str:
+    validated = _validate_llm_answer(answer, question, evidence, question_ctx=question_ctx)
     return validated or ""
 
 
@@ -814,7 +826,7 @@ def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet], qu
         parts = _split_sentences(snippet.quote)
         if not parts:
             continue
-        best = max(parts, key=lambda sent: (_best_sentence_score(sent, question), _sentence_support(sent, [snippet])))
+        best = max(parts, key=lambda sent: (_best_sentence_score(sent, question, question_ctx=question_ctx), _sentence_support(sent, [snippet])))
         best = _normalize(best)
         if best and best not in sentences:
             sentences.append(f"{best} [p. {snippet.page_number}]")
@@ -942,9 +954,9 @@ def investigate_reading(
 
     answer = _fallback_answer(question, selected_evidence, question_ctx=question_ctx)
     if answer_model:
-        llm_answer = _answer_with_llm(question, refined_query, selected_evidence, answer_model, ollama_base_url, diagnostics=diagnostics)
+        llm_answer = _answer_with_llm(question, refined_query, selected_evidence, answer_model, ollama_base_url, diagnostics=diagnostics, question_ctx=question_ctx)
         if llm_answer:
-            filtered = _filter_supported_answer(llm_answer, question, selected_evidence)
+            filtered = _filter_supported_answer(llm_answer, question, selected_evidence, question_ctx=question_ctx)
             diagnostics["llm_answer_filtered_out"] = bool(llm_answer and not filtered)
             if filtered:
                 answer = filtered
