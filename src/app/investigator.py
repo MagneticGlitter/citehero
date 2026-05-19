@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 import json
 import math
 import re
@@ -109,11 +110,38 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+@lru_cache(maxsize=8192)
+def _tokenize_cached(text: str) -> tuple[str, ...]:
+    return tuple(token for token in re.findall(r"[A-Za-z0-9']+", text.lower()) if token and token not in _STOPWORDS)
+
+
 def _tokenize(text: str) -> list[str]:
-    return [token for token in re.findall(r"[A-Za-z0-9']+", text.lower()) if token and token not in _STOPWORDS]
+    return list(_tokenize_cached(text))
+
+
+@lru_cache(maxsize=8192)
+def _extract_entities_cached(text: str, limit: int = 12) -> tuple[str, ...]:
+    pattern = re.compile(r"\b(?:[A-Z][A-Za-z'’-]*(?:\s+[A-Z][A-Za-z'’-]*){0,3})\b")
+    seen: set[str] = set()
+    entities: list[str] = []
+    for match in pattern.findall(text or ""):
+        entity = re.sub(r"\s+", " ", match).strip(" ,.;:!?\"'")
+        if len(entity) < 2:
+            continue
+        lower = entity.lower()
+        if lower in _STOPWORDS or lower in seen:
+            continue
+        if any(word.lower() in _STOPWORDS for word in entity.split()):
+            continue
+        seen.add(lower)
+        entities.append(entity)
+        if len(entities) >= limit:
+            break
+    return tuple(entities)
 
 
 def _extract_entities(text: str, limit: int = 12) -> list[str]:
+    return list(_extract_entities_cached(text, limit))
     pattern = re.compile(r"\b(?:[A-Z][A-Za-z'’-]*(?:\s+[A-Z][A-Za-z'’-]*){0,3})\b")
     seen: set[str] = set()
     entities: list[str] = []
@@ -473,9 +501,14 @@ def _expand_with_adjacent_pages(
     return list(dedup.values())
 
 
-def _split_sentences(text: str) -> list[str]:
+@lru_cache(maxsize=8192)
+def _split_sentences_cached(text: str) -> tuple[str, ...]:
     pieces = re.split(r"(?<=[.!?])\s+", _normalize(text))
-    return [piece.strip() for piece in pieces if piece.strip()]
+    return tuple(piece.strip() for piece in pieces if piece.strip())
+
+
+def _split_sentences(text: str) -> list[str]:
+    return list(_split_sentences_cached(text))
 
 
 def _sentence_window(sentences: list[str], center_index: int, radius: int = 1) -> str:
