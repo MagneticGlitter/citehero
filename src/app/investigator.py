@@ -280,8 +280,8 @@ def _is_broad_question(question: str) -> bool:
     return _question_context(question)[3]
 
 
-def _build_query_variants(question: str, summary_context: dict[str, Any]) -> list[str]:
-    base, _, _, broad, profile = _question_context(question)
+def _build_query_variants(question: str, summary_context: dict[str, Any], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> list[str]:
+    base, _, _, broad, profile = question_ctx or _question_context(question)
     entity_terms = summary_context.get("summary_entities", [])[:6]
     keyword_terms = summary_context.get("summary_keywords", [])[:8]
     relation_terms = summary_context.get("summary_relations", [])[:4]
@@ -446,9 +446,9 @@ def retrieve_chunks(
     return scored[:top_k]
 
 
-def _rerank_hits_for_question(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None) -> list[RetrievedChunk]:
+def _rerank_hits_for_question(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> list[RetrievedChunk]:
     summary_context = summary_context or {}
-    _, qtokens, _, broad, _ = _question_context(question)
+    _, qtokens, _, broad, _ = question_ctx or _question_context(question)
     summary_terms = set(_summary_signal_terms(summary_context)) if broad else set()
     qterms = set(qtokens)
     weighted: list[tuple[float, RetrievedChunk]] = []
@@ -531,9 +531,9 @@ def _sentence_window(sentences: list[str], center_index: int, radius: int = 1) -
     return " ".join(sentences[start:end]).strip()
 
 
-def _best_sentence_score(sentence: str, question: str, summary_context: dict[str, Any] | None = None) -> float:
+def _best_sentence_score(sentence: str, question: str, summary_context: dict[str, Any] | None = None, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> float:
     summary_context = summary_context or {}
-    _, qtokens, _, broad, _ = _question_context(question)
+    _, qtokens, _, broad, _ = question_ctx or _question_context(question)
     qterms = set(qtokens)
     stokens = set(_tokenize(sentence))
     sterms = set(_summary_signal_terms(summary_context)) if broad else set()
@@ -543,8 +543,8 @@ def _best_sentence_score(sentence: str, question: str, summary_context: dict[str
     return score
 
 
-def _select_evidence_snippets(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None, max_snippets: int = 3) -> list[EvidenceSnippet]:
-    profile = _question_profile(question)
+def _select_evidence_snippets(question: str, hits: list[RetrievedChunk], summary_context: dict[str, Any] | None = None, max_snippets: int = 3, question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> list[EvidenceSnippet]:
+    profile = (question_ctx or _question_context(question))[4]
     weighted: list[tuple[float, EvidenceSnippet]] = []
     full_pages = {hit.page_number for hit in hits if hit.chunk_id.endswith("_full")}
     preferred_hits = [hit for hit in hits if hit.page_number not in full_pages or hit.chunk_id.endswith("_full")]
@@ -556,7 +556,7 @@ def _select_evidence_snippets(question: str, hits: list[RetrievedChunk], summary
         best_score = -1.0
         best_index = 0
         for index, sentence in enumerate(sentences):
-            score = _best_sentence_score(sentence, question, summary_context=summary_context)
+            score = _best_sentence_score(sentence, question, summary_context=summary_context, question_ctx=question_ctx)
             if score > best_score:
                 best_score = score
                 best_sentence = sentence.strip()
@@ -800,12 +800,12 @@ def _filter_supported_answer(answer: str, question: str, evidence: list[Evidence
     return validated or ""
 
 
-def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet]) -> str:
+def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> str:
     if not selected_evidence:
         return "I couldn’t find enough evidence in the retrieved pages."
     sentences: list[str] = []
     seen_pages: set[int] = set()
-    _, _, _, broad, _ = _question_context(question)
+    _, _, _, broad, _ = question_ctx or _question_context(question)
     for snippet in selected_evidence:
         if snippet.page_number in seen_pages:
             continue
@@ -832,8 +832,8 @@ def _fallback_answer(question: str, selected_evidence: list[EvidenceSnippet]) ->
     return " ".join(sentences)
 
 
-def _evidence_sufficiency(question: str, evidence: list[EvidenceSnippet]) -> dict[str, Any]:
-    _, qtokens, question_entities_raw, broad, _ = _question_context(question)
+def _evidence_sufficiency(question: str, evidence: list[EvidenceSnippet], question_ctx: tuple[str, tuple[str, ...], tuple[str, ...], bool, dict[str, bool]] | None = None) -> dict[str, Any]:
+    _, qtokens, question_entities_raw, broad, _ = question_ctx or _question_context(question)
     qterms = set(qtokens)
     evidence_text = " ".join(snippet.quote for snippet in evidence)
     evidence_terms = set(_tokenize(evidence_text))
@@ -868,7 +868,8 @@ def investigate_reading(
     ollama_base_url: str = "http://localhost:11434",
 ) -> InvestigationResult:
     summary_context = _load_summary_context(reading_id, base_dir)
-    refined_query = refine_query(question)
+    question_ctx = _question_context(question)
+    refined_query = question_ctx[0]
     diagnostics: dict[str, Any] = {
         "llm_attempted": False,
         "llm_succeeded": False,
@@ -877,12 +878,12 @@ def investigate_reading(
         reading_id,
         question,
         base_dir=base_dir,
-        top_k=max(top_k, 12 if _is_broad_question(question) else top_k),
+        top_k=max(top_k, 12 if question_ctx[3] else top_k),
         summary_context=summary_context,
         diagnostics=diagnostics,
     )
     diagnostics["pages_before_rerank"] = [hit.page_number for hit in hits]
-    hits = _rerank_hits_for_question(question, hits, summary_context=summary_context)
+    hits = _rerank_hits_for_question(question, hits, summary_context=summary_context, question_ctx=question_ctx)
     diagnostics["pages_after_rerank"] = [hit.page_number for hit in hits[:top_k]]
 
     # First follow-up pass: if we found promising pages, include adjacent pages so
@@ -890,18 +891,19 @@ def investigate_reading(
     expanded_hits = _expand_with_adjacent_pages(reading_id, hits[:top_k], base_dir)
     if len(expanded_hits) > len(hits[:top_k]):
         diagnostics["adjacent_expansion_added"] = len(expanded_hits) - len(hits[:top_k])
-        hits = _rerank_hits_for_question(question, expanded_hits, summary_context=summary_context)
+        hits = _rerank_hits_for_question(question, expanded_hits, summary_context=summary_context, question_ctx=question_ctx)
     else:
         hits = hits[:top_k]
     diagnostics["pages_after_expansion"] = [hit.page_number for hit in hits[: max(top_k, 12)]]
 
     selected_evidence = _select_evidence_snippets(
         question,
-        hits[: max(top_k, 12 if _is_broad_question(question) else top_k)],
+        hits[: max(top_k, 12 if question_ctx[3] else top_k)],
         summary_context=summary_context,
-        max_snippets=5 if _is_broad_question(question) else 3,
+        max_snippets=5 if question_ctx[3] else 3,
+        question_ctx=question_ctx,
     )
-    diagnostics["evidence_sufficiency"] = _evidence_sufficiency(question, selected_evidence)
+    diagnostics["evidence_sufficiency"] = _evidence_sufficiency(question, selected_evidence, question_ctx=question_ctx)
 
     # One agentic follow-up retrieval pass: let the answer model inspect current
     # evidence and propose missing-evidence search queries, then merge those hits
@@ -924,18 +926,19 @@ def investigate_reading(
                     existing = merged.get(key)
                     if existing is None or hit.score > existing.score:
                         merged[key] = hit
-            hits = _rerank_hits_for_question(question, list(merged.values()), summary_context=summary_context)
-            hits = _rerank_hits_for_question(question, _expand_with_adjacent_pages(reading_id, hits[: max(top_k, 12)], base_dir), summary_context=summary_context)
+            hits = _rerank_hits_for_question(question, list(merged.values()), summary_context=summary_context, question_ctx=question_ctx)
+            hits = _rerank_hits_for_question(question, _expand_with_adjacent_pages(reading_id, hits[: max(top_k, 12)], base_dir), summary_context=summary_context, question_ctx=question_ctx)
             selected_evidence = _select_evidence_snippets(
                 question,
-                hits[: max(top_k, 12 if _is_broad_question(question) else top_k)],
+                hits[: max(top_k, 12 if question_ctx[3] else top_k)],
                 summary_context=summary_context,
-                max_snippets=5 if _is_broad_question(question) else 3,
+                max_snippets=5 if question_ctx[3] else 3,
+                question_ctx=question_ctx,
             )
             diagnostics["pages_after_followup"] = [hit.page_number for hit in hits[: max(top_k, 12)]]
             diagnostics["evidence_sufficiency_after_followup"] = _evidence_sufficiency(question, selected_evidence)
 
-    answer = _fallback_answer(question, selected_evidence)
+    answer = _fallback_answer(question, selected_evidence, question_ctx=question_ctx)
     if answer_model:
         llm_answer = _answer_with_llm(question, refined_query, selected_evidence, answer_model, ollama_base_url, diagnostics=diagnostics)
         if llm_answer:
