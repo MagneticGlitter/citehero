@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const PROJECT_ROOT = process.env.CITEHERO_PROJECT_ROOT ?? "/home/magneticglitter/school/citehero";
-const DEFAULT_BASE_DIR = process.env.CITEHERO_BASE_DIR ?? join(PROJECT_ROOT, "data", "ocr");
+const DEFAULT_BASE_DIR = process.env.CITEHERO_BASE_DIR ?? "/home/magneticglitter/csc485/texts/data/ocr";
 
 function runBinary(binary: string, args: string[], cwd: string): string {
   return execFileSync(binary, args, {
