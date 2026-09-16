@@ -7,3 +7,4 @@ data/raw/*
 dist/
 build/
 *.egg
+prompt-formats/

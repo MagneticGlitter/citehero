@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "app"
+name = "citehero"
 version = "0.1.0"
-description = "Local page-grounded OCR + LlamaIndex pipeline for course readings"
+description = "Local page-grounded OCR + RAG pipeline for course readings and essay drafting"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = ["paddleocr>=2.7"]
+
+[project.scripts]
+citehero = "app.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

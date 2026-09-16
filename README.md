@@ -1,6 +1,6 @@
-# reading app
+# citehero
 
-Local, page-grounded reading app for PDFs and course materials.
+Local, page-grounded reading and citation workflow for PDFs, course materials, and essay drafting.
 
 ## What this project is
 
@@ -37,6 +37,7 @@ A Pi-friendly tool with 3 parts:
 
 ### 1) OCR + indexing
 - Render PDF pages locally with PyMuPDF.
+- Use a lower default OCR DPI (120) to reduce memory usage on large slide decks.
 - OCR each page separately with PaddleOCR when needed.
 - Keep page text, OCR confidence, and source metadata.
 - Chunk from page documents, not from one big chapter blob.
@@ -81,38 +82,69 @@ A Pi-friendly tool with 3 parts:
 
 ## How to run
 
+Install the portable CLI once:
+
+```bash
+pip install -e /home/magneticglitter/school/citehero
+```
+
+Check the resolved paths from any directory:
+
+```bash
+citehero paths --json
+```
+
 Put a PDF in `data/raw/`, then run:
 
 ```bash
-python ingest.py --file "Homer Iliad Book 1.pdf" --reading-id iliad_book1 --title "Homer Iliad Book 1" --author Homer --renderer pymupdf --dpi 120
+citehero ingest --file "Homer Iliad Book 1.pdf" --reading-id iliad_book1 --title "Homer Iliad Book 1" --author Homer --renderer pymupdf
 ```
 
 Then summarize separately:
 
 ```bash
-python main.py summarize --reading-id iliad_book1 --llm-model qwen2.5-deterministic
+citehero summarize --reading-id iliad_book1 --llm-model qwen2.5-deterministic
 ```
 
 Build study materials:
 
 ```bash
-python main.py study --reading-id iliad_book1
+citehero study --reading-id iliad_book1
 ```
 
 Then ask questions:
 
 ```bash
-python main.py ask --reading-id iliad_book1 --question "Who is Achilles arguing with?"
+citehero ask --reading-id iliad_book1 --question "Who is Achilles arguing with?"
 ```
 
-Pi integration lives in:
+Path resolution order for OCR data and prompt formats:
+
+1. explicit CLI/tool argument
+2. `CITEHERO_BASE_DIR` / `CITEHERO_PROMPT_FORMATS_DIR`
+3. `~/.config/citehero/config.json`
+4. checkout defaults: `data/ocr` and `prompt-formats`
+
+Pi integration surfaces:
 
 ```text
-.pi/
-  extensions/literature.ts
-  agents/literature-investigator.md
-  agents/literature-assistant.md
+.pi/extensions/literature.ts              # project-local legacy aliases: literature_rag, literature_study
+~/.pi/agent/extensions/citehero.ts        # global tools: citehero_rag, citehero_study, citehero_prompt_format, citehero_paths
+~/.pi/agent/skills/citehero-rag/SKILL.md  # global instructions for agents
+.pi/agents/                              # project-local literature/essay subagents
 ```
+
+## Essay workflow
+
+Essay prompts, outline rules, and the draft review loop live in the prompt-format library.
+Read them from any directory with:
+
+```bash
+citehero prompt list
+citehero prompt read essay-writing/README.md
+```
+
+That folder is the main entrypoint for essay work once OCR and summaries exist under the resolved OCR base directory (`citehero paths --json`).
 
 You can also use a full path instead of a filename. If the file name is found in `data/raw/`, the app will use that automatically.
 
@@ -139,6 +171,12 @@ data/
   agents/
     literature-investigator.md
     literature-assistant.md
+    essay-reviewer.md
+    essay-style-reviewer.md
+prompt-formats/
+  essay-writing/
+    README.md
+    essay-writing-workflow.md
 public/
   idea.jpeg
 ```
